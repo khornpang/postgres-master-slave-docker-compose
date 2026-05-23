@@ -1,0 +1,276 @@
+# Production-ready Postgres primary + standby with PgBouncer and automated backups.
+# See README.md for setup steps and operational notes.
+
+x-common-env: &common-env
+  TZ: Asia/Phnom_Penh
+  PGTZ: Asia/Phnom_Penh
+
+services:
+  # ─────────────────────────────────────────────────────────────────
+  # PRIMARY  - accepts writes, archives WAL, source of replication
+  # ─────────────────────────────────────────────────────────────────
+  postgres-primary:
+    image: postgres:16-alpine
+    container_name: postgres-primary
+    restart: unless-stopped
+    stop_grace_period: 1m   # let postgres shut down cleanly
+    shm_size: 256m          # for parallel queries / sorts
+    secrets:
+      - postgres_password
+      - replication_password
+      - readonly_password
+      - pgbouncer_auth_password
+    environment:
+      <<: *common-env
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      # POSTGRES_DBS is comma-separated. primary-entrypoint.sh exports
+      # POSTGRES_DB = first entry so the postgres image bootstraps that one
+      # at initdb time; init-primary.sh creates the remaining databases.
+      POSTGRES_DBS: ${POSTGRES_DBS:-monitor}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256 --data-checksums"
+      REPLICATION_USER: ${REPLICATION_USER:-replicator}
+      READONLY_USER: ${READONLY_USER:-app_readonly}
+      PGBOUNCER_AUTH_USER: ${PGBOUNCER_AUTH_USER:-pgbouncer}
+      # PGPORT makes libpq clients (psql, pg_isready, pg_basebackup) default
+      # to POSTGRES_PORT. The `-c port=...` in `command:` overrides the value
+      # baked into postgresql.conf so the server listens on the same port.
+      PGPORT: ${POSTGRES_PORT:-5432}
+    entrypoint: /usr/local/bin/primary-entrypoint.sh
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      - -c
+      - port=${POSTGRES_PORT:-5432}
+    volumes:
+      - primary_data:/var/lib/postgresql/data
+      - primary_logs:/var/log/postgresql
+      - wal_archive:/var/lib/postgresql/archive
+      - ./config/primary/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./config/primary/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./init/init-primary.sh:/docker-entrypoint-initdb.d/01-init-primary.sh:ro
+      - ./init/primary-entrypoint.sh:/usr/local/bin/primary-entrypoint.sh:ro
+    networks:
+      pg-net:
+        ipv4_address: 172.28.0.10
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+        reservations:
+          memory: 2G
+    healthcheck:
+      # First DB in POSTGRES_DBS is the bootstrap target.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $$(echo $${POSTGRES_DBS} | cut -d, -f1 | tr -d '[:space:]') -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ─────────────────────────────────────────────────────────────────
+  # STANDBY - hot replica, read-only, serves report queries
+  # ─────────────────────────────────────────────────────────────────
+  postgres-standby:
+    image: postgres:16-alpine
+    container_name: postgres-standby
+    restart: unless-stopped
+    stop_grace_period: 1m
+    shm_size: 256m
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    secrets:
+      - postgres_password
+      - replication_password
+    environment:
+      <<: *common-env
+      PRIMARY_HOST: postgres-primary
+      PRIMARY_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      # Physical replication is cluster-wide, so the standby inherits all
+      # databases from the primary; POSTGRES_DBS is only used to derive a
+      # target for the healthcheck (first entry).
+      POSTGRES_DBS: ${POSTGRES_DBS:-monitor}
+      REPLICATION_USER: ${REPLICATION_USER:-replicator}
+      REPLICATION_SLOT: standby_slot
+      # Standby listens on the same POSTGRES_PORT. See primary for the
+      # PGPORT + `-c port=...` rationale.
+      PGPORT: ${POSTGRES_PORT:-5432}
+    volumes:
+      - standby_data:/var/lib/postgresql/data
+      - standby_logs:/var/log/postgresql
+      - ./config/standby/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./config/standby/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./init/init-standby.sh:/usr/local/bin/init-standby.sh:ro
+    entrypoint: /usr/local/bin/init-standby.sh
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      - -c
+      - port=${POSTGRES_PORT:-5432}
+    networks:
+      pg-net:
+        ipv4_address: 172.28.0.11
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+        reservations:
+          memory: 2G
+    healthcheck:
+      # First DB in POSTGRES_DBS is the bootstrap target.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $$(echo $${POSTGRES_DBS} | cut -d, -f1 | tr -d '[:space:]') -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ─────────────────────────────────────────────────────────────────
+  # PGBOUNCER - transaction pooling, single endpoint for app
+  # For every <db> in POSTGRES_DBS (e.g., monitor,logger):
+  #   localhost:6432  - "<db>"     -> primary  (writes)
+  #   localhost:6432  - "<db>_ro"  -> standby  (reads / reports)
+  # pgbouncer-entrypoint.sh renders pgbouncer.ini from its template at startup.
+  # ─────────────────────────────────────────────────────────────────
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.23.1-p2
+    container_name: pgbouncer
+    restart: unless-stopped
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    secrets:
+      - pgbouncer_auth_password
+    environment:
+      <<: *common-env
+      # Used by pgbouncer-entrypoint.sh to render pgbouncer.ini.template
+      POSTGRES_DBS: ${POSTGRES_DBS:-monitor}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      PGBOUNCER_AUTH_USER: ${PGBOUNCER_AUTH_USER:-pgbouncer}
+      # edoburu/pgbouncer reads these to populate userlist.txt.
+      # auth_query takes over after the bootstrap user is set up.
+      DB_USER: ${PGBOUNCER_AUTH_USER:-pgbouncer}
+      DB_PASSWORD_FILE: /run/secrets/pgbouncer_auth_password
+      AUTH_TYPE: scram-sha-256
+    entrypoint: /usr/local/bin/pgbouncer-entrypoint.sh
+    # Setting `entrypoint:` resets the image's default CMD, so we restate
+    # the pgbouncer launch args here. Our wrapper exec's the upstream
+    # entrypoint with these, which ends with `exec "$@"`.
+    command: ["/usr/bin/pgbouncer", "/etc/pgbouncer/pgbouncer.ini"]
+    volumes:
+      - ./pgbouncer/pgbouncer.ini.template:/etc/pgbouncer/pgbouncer.ini.template:ro
+      - ./pgbouncer/pgbouncer-entrypoint.sh:/usr/local/bin/pgbouncer-entrypoint.sh:ro
+    ports:
+      # Bind to localhost only. Containers on pg-net reach pgbouncer via
+      # the service name on port 6432.
+      - "127.0.0.1:6432:6432"
+    networks:
+      pg-net:
+        ipv4_address: 172.28.0.20
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    healthcheck:
+      # BusyBox `nc -z localhost` resolves to ::1 (IPv6) in this image and
+      # fails; pgbouncer listens on 0.0.0.0 (IPv4). Use 127.0.0.1 explicitly.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ─────────────────────────────────────────────────────────────────
+  # BACKUP - daily pg_basebackup + WAL archive cleanup
+  # Backups land in the `backups` volume, syncable to offsite storage.
+  # ─────────────────────────────────────────────────────────────────
+  postgres-backup:
+    image: postgres:16-alpine
+    container_name: postgres-backup
+    restart: unless-stopped
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    secrets:
+      - replication_password
+    environment:
+      <<: *common-env
+      PRIMARY_HOST: postgres-primary
+      PRIMARY_PORT: ${POSTGRES_PORT:-5432}
+      REPLICATION_USER: ${REPLICATION_USER:-replicator}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-0 2 * * *}   # daily 02:00 ICT
+    volumes:
+      - backups:/backups
+      - wal_archive:/var/lib/postgresql/archive
+      - backup_logs:/var/log/backup
+      - ./backup/backup.sh:/usr/local/bin/backup.sh:ro
+      - ./backup/entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: /entrypoint.sh
+    networks:
+      - pg-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+# ─────────────────────────────────────────────────────────────────
+# SECRETS - mounted as /run/secrets/<name>. Files MUST be chmod 0600.
+# ─────────────────────────────────────────────────────────────────
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  replication_password:
+    file: ./secrets/replication_password.txt
+  readonly_password:
+    file: ./secrets/readonly_password.txt
+  pgbouncer_auth_password:
+    file: ./secrets/pgbouncer_auth_password.txt
+
+# ─────────────────────────────────────────────────────────────────
+# VOLUMES - all named, so docker compose down does NOT delete data
+# ─────────────────────────────────────────────────────────────────
+volumes:
+  primary_data:
+  primary_logs:
+  standby_data:
+  standby_logs:
+  wal_archive:
+  backups:
+  backup_logs:
+
+networks:
+  pg-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

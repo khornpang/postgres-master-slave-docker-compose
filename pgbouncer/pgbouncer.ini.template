@@ -1,0 +1,69 @@
+; PgBouncer configuration TEMPLATE.
+; pgbouncer-entrypoint.sh replaces the `; __PGB_DATABASES__` marker line
+; below with one writes (<db>) + one reads (<db>_ro) pool per entry in
+; POSTGRES_DBS, and substitutes PGBOUNCER_AUTH_USER everywhere it appears.
+;
+; The edoburu/pgbouncer image generates a userlist.txt at startup from the
+; DB_USER + DB_PASSWORD_FILE env vars. After that the auth_query takes over
+; to look up application user passwords on demand.
+
+[databases]
+; __PGB_DATABASES__
+
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 6432
+
+;; ---------- Authentication ----------
+auth_type = scram-sha-256
+auth_file = /etc/pgbouncer/userlist.txt
+auth_user = ${PGBOUNCER_AUTH_USER}
+; Function defined in init-primary.sh - SECURITY DEFINER so the pgbouncer
+; role doesn't need direct read on pg_shadow.
+auth_query = SELECT uname, phash FROM pgbouncer.user_lookup($1)
+
+;; ---------- Pool mode ----------
+; transaction = best throughput; Prisma compatible with ?pgbouncer=true
+pool_mode = transaction
+
+;; ---------- Pool sizing ----------
+max_client_conn       = 1000
+default_pool_size     = 25
+min_pool_size         = 5
+reserve_pool_size     = 5
+reserve_pool_timeout  = 3
+max_db_connections    = 50
+max_user_connections  = 50
+
+;; ---------- Timeouts ----------
+server_connect_timeout = 15
+server_idle_timeout    = 600
+server_lifetime        = 3600
+query_timeout          = 0
+query_wait_timeout     = 120
+client_idle_timeout    = 0
+client_login_timeout   = 60
+
+;; ---------- Logging / admin ----------
+log_connections       = 1
+log_disconnections    = 1
+log_pooler_errors     = 1
+log_stats             = 1
+stats_period          = 60
+admin_users           = ${PGBOUNCER_AUTH_USER}
+stats_users           = ${PGBOUNCER_AUTH_USER}
+
+;; ---------- Misc ----------
+; Prisma sends `extra_float_digits` and similar startup params - ignore them
+; rather than rejecting the connection.
+ignore_startup_parameters = extra_float_digits,options,search_path
+
+server_tls_sslmode    = prefer
+server_check_query    = select 1
+server_check_delay    = 30
+
+;; TCP keepalive - detect dead connections to upstream
+tcp_keepalive          = 1
+tcp_keepidle           = 60
+tcp_keepintvl          = 10
+tcp_keepcnt            = 6
