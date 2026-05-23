@@ -53,6 +53,10 @@ services:
       - ./config/primary/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
       - ./init/init-primary.sh:/docker-entrypoint-initdb.d/01-init-primary.sh:ro
       - ./init/primary-entrypoint.sh:/usr/local/bin/primary-entrypoint.sh:ro
+    ports:
+      # Exposed for pgAdmin / remote tooling. Bound to all interfaces —
+      # restrict via host firewall / security group.
+      - "${POSTGRES_PORT:-5432}:${POSTGRES_PORT:-5432}"
     networks:
       pg-net:
         ipv4_address: 172.28.0.10
@@ -111,6 +115,11 @@ services:
       - ./config/standby/postgresql.conf:/etc/postgresql/postgresql.conf:ro
       - ./config/standby/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
       - ./init/init-standby.sh:/usr/local/bin/init-standby.sh:ro
+    ports:
+      # Exposed for pgAdmin / remote tooling. Host port 5433 to avoid
+      # collision with the primary; container still listens on POSTGRES_PORT.
+      # Bound to all interfaces — restrict via host firewall / security group.
+      - "5433:${POSTGRES_PORT:-5432}"
     entrypoint: /usr/local/bin/init-standby.sh
     command:
       - postgres
