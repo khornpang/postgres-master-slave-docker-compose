@@ -155,8 +155,8 @@ services:
   # ─────────────────────────────────────────────────────────────────
   # PGBOUNCER - transaction pooling, single endpoint for app
   # For every <db> in POSTGRES_DBS (e.g., monitor,logger):
-  #   localhost:6432  - "<db>"     -> primary  (writes)
-  #   localhost:6432  - "<db>_ro"  -> standby  (reads / reports)
+  #   localhost:PGBOUNCER_PORT  - "<db>"     -> primary  (writes)
+  #   localhost:PGBOUNCER_PORT  - "<db>_ro"  -> standby  (reads / reports)
   # pgbouncer-entrypoint.sh renders pgbouncer.ini from its template at startup.
   # ─────────────────────────────────────────────────────────────────
   pgbouncer:
@@ -173,6 +173,7 @@ services:
       # Used by pgbouncer-entrypoint.sh to render pgbouncer.ini.template
       POSTGRES_DBS: ${POSTGRES_DBS:-monitor}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      PGBOUNCER_PORT: ${PGBOUNCER_PORT:-6432}
       PGBOUNCER_AUTH_USER: ${PGBOUNCER_AUTH_USER:-pgbouncer}
       # edoburu/pgbouncer reads these to populate userlist.txt.
       # auth_query takes over after the bootstrap user is set up.
@@ -189,8 +190,8 @@ services:
       - ./pgbouncer/pgbouncer-entrypoint.sh:/usr/local/bin/pgbouncer-entrypoint.sh:ro
     ports:
       # Bind to localhost only. Containers on pg-net reach pgbouncer via
-      # the service name on port 6432.
-      - "127.0.0.1:6432:6432"
+      # the service name on PGBOUNCER_PORT.
+      - "127.0.0.1:${PGBOUNCER_PORT:-6432}:${PGBOUNCER_PORT:-6432}"
     networks:
       pg-net:
         ipv4_address: 172.28.0.20
@@ -202,7 +203,7 @@ services:
     healthcheck:
       # BusyBox `nc -z localhost` resolves to ::1 (IPv6) in this image and
       # fails; pgbouncer listens on 0.0.0.0 (IPv4). Use 127.0.0.1 explicitly.
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432 || exit 1"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${PGBOUNCER_PORT:-6432} || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5

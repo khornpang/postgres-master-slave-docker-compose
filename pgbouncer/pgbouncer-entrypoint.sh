@@ -5,7 +5,8 @@
 #      POSTGRES_PORT.
 #   2. Replace the `; __PGB_DATABASES__` marker line in the template with
 #      the generated pool block.
-#   3. Substitute ${PGBOUNCER_AUTH_USER} wherever it appears.
+#   3. Substitute ${PGBOUNCER_AUTH_USER} and ${PGBOUNCER_PORT} wherever
+#      they appear.
 # Then hand off to the upstream edoburu/pgbouncer entrypoint, which builds
 # userlist.txt from DB_USER + DB_PASSWORD and execs pgbouncer. Note: the
 # upstream script does NOT support DB_PASSWORD_FILE, so we read the file
@@ -14,6 +15,7 @@ set -eu
 
 : "${POSTGRES_DBS:=monitor}"
 : "${POSTGRES_PORT:=5432}"
+: "${PGBOUNCER_PORT:=6432}"
 : "${PGBOUNCER_AUTH_USER:=pgbouncer}"
 
 TEMPLATE=/etc/pgbouncer/pgbouncer.ini.template
@@ -48,6 +50,7 @@ fi
 echo "[pgbouncer-entrypoint] Rendering $TARGET"
 echo "[pgbouncer-entrypoint]   POSTGRES_DBS=$POSTGRES_DBS"
 echo "[pgbouncer-entrypoint]   POSTGRES_PORT=$POSTGRES_PORT"
+echo "[pgbouncer-entrypoint]   PGBOUNCER_PORT=$PGBOUNCER_PORT"
 echo "[pgbouncer-entrypoint]   PGBOUNCER_AUTH_USER=$PGBOUNCER_AUTH_USER"
 
 # Upstream entrypoint reads DB_PASSWORD (plain env var) to write userlist.txt
@@ -60,20 +63,24 @@ if [ -z "${DB_PASSWORD:-}" ] && [ -n "${DB_PASSWORD_FILE:-}" ] && [ -r "$DB_PASS
 fi
 
 # awk substitution: inject the [databases] block at the marker line, and
-# replace ${PGBOUNCER_AUTH_USER} on every other line. Using index/substr
-# instead of gsub so the placeholder text isn't interpreted as a regex.
-awk -v dbsfile="$DB_BLOCK" -v auth="$PGBOUNCER_AUTH_USER" '
+# replace ${PGBOUNCER_AUTH_USER} / ${PGBOUNCER_PORT} on every other line.
+# Using index/substr instead of gsub so the placeholder text isn't
+# interpreted as a regex.
+awk -v dbsfile="$DB_BLOCK" -v auth="$PGBOUNCER_AUTH_USER" -v port="$PGBOUNCER_PORT" '
+  function subst(line, needle, value,    p) {
+    while ((p = index(line, needle)) > 0) {
+      line = substr(line, 1, p - 1) value substr(line, p + length(needle))
+    }
+    return line
+  }
   /^; __PGB_DATABASES__$/ {
     while ((getline line < dbsfile) > 0) print line
     close(dbsfile)
     next
   }
   {
-    line = $0
-    needle = "${PGBOUNCER_AUTH_USER}"
-    while ((p = index(line, needle)) > 0) {
-      line = substr(line, 1, p - 1) auth substr(line, p + length(needle))
-    }
+    line = subst($0,   "${PGBOUNCER_AUTH_USER}", auth)
+    line = subst(line, "${PGBOUNCER_PORT}",      port)
     print line
   }
 ' "$TEMPLATE" > "$TARGET"

@@ -12,7 +12,7 @@
 
 [pgbouncer]
 listen_addr = 0.0.0.0
-listen_port = 6432
+listen_port = ${PGBOUNCER_PORT}
 
 ;; ---------- Authentication ----------
 auth_type = scram-sha-256

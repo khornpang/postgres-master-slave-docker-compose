@@ -17,6 +17,7 @@ set +a
 POSTGRES_USER="${POSTGRES_USER:-app}"
 POSTGRES_DBS="${POSTGRES_DBS:-monitor}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+PGBOUNCER_PORT="${PGBOUNCER_PORT:-6432}"
 READONLY_USER="${READONLY_USER:-app_readonly}"
 
 # Split POSTGRES_DBS into an array; first entry is the bootstrap DB used
@@ -136,7 +137,7 @@ for db in "${DB_LIST[@]}"; do
   ro_db="${db}_ro"
 
   d_writes=$(docker compose exec -T -e PGPASSWORD="$PG_PASS" postgres-primary \
-    psql -h pgbouncer -p 6432 -U "$POSTGRES_USER" -d "$db" -tA -v ON_ERROR_STOP=1 \
+    psql -h pgbouncer -p "$PGBOUNCER_PORT" -U "$POSTGRES_USER" -d "$db" -tA -v ON_ERROR_STOP=1 \
     -c "SELECT pg_is_in_recovery();" 2>&1 | tr -d '[:space:]')
   if [ "$d_writes" = "f" ]; then
     pass "pool '$db' lands on primary (recovery=f)"
@@ -145,7 +146,7 @@ for db in "${DB_LIST[@]}"; do
   fi
 
   d_reads=$(docker compose exec -T -e PGPASSWORD="$RO_PASS" postgres-primary \
-    psql -h pgbouncer -p 6432 -U "$READONLY_USER" -d "$ro_db" -tA -v ON_ERROR_STOP=1 \
+    psql -h pgbouncer -p "$PGBOUNCER_PORT" -U "$READONLY_USER" -d "$ro_db" -tA -v ON_ERROR_STOP=1 \
     -c "SELECT pg_is_in_recovery();" 2>&1 | tr -d '[:space:]')
   if [ "$d_reads" = "t" ]; then
     pass "pool '$ro_db' lands on standby (recovery=t)"
