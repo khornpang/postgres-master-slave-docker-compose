@@ -189,9 +189,11 @@ services:
       - ./pgbouncer/pgbouncer.ini.template:/etc/pgbouncer/pgbouncer.ini.template:ro
       - ./pgbouncer/pgbouncer-entrypoint.sh:/usr/local/bin/pgbouncer-entrypoint.sh:ro
     ports:
-      # Bind to localhost only. Containers on pg-net reach pgbouncer via
-      # the service name on PGBOUNCER_PORT.
-      - "127.0.0.1:${PGBOUNCER_PORT:-6432}:${PGBOUNCER_PORT:-6432}"
+      # Bind host controlled by BIND_HOST (default 127.0.0.1 for safe local
+      # dev). Set BIND_HOST=0.0.0.0 in .env to expose on the server's
+      # public IP. Containers on pg-net always reach pgbouncer via the
+      # service name on PGBOUNCER_PORT regardless of BIND_HOST.
+      - "${BIND_HOST:-127.0.0.1}:${PGBOUNCER_PORT:-6432}:${PGBOUNCER_PORT:-6432}"
     networks:
       pg-net:
         ipv4_address: 172.28.0.20

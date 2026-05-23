@@ -24,7 +24,7 @@ access, secrets out of env vars.
                                                           │
                   ┌───────────────────┐                   │
    App ──────────▶│     pgbouncer     │───────────────────┘
-   (127.0.0.1     │    172.28.0.20    │   per <db> in POSTGRES_DBS:
+   (128.199.94.227│    172.28.0.20    │   per <db> in POSTGRES_DBS:
     :6432)        │                   │     <db>     -> primary
                   └───────────────────┘     <db>_ro  -> standby
 ```
@@ -130,10 +130,10 @@ docker exec -it postgres-standby psql -U app -d monitor -c "INSERT INTO _smoke V
 # D) PgBouncer routes correctly (one pair per <db> in POSTGRES_DBS)
 PG_PASS=$(cat secrets/postgres_password.txt)
 RO_PASS=$(cat secrets/readonly_password.txt)
-PGPASSWORD="$PG_PASS"   psql "host=127.0.0.1 port=6432 user=app          dbname=monitor"    -c "SELECT 'monitor via pgbouncer -> primary';"
-PGPASSWORD="$RO_PASS"   psql "host=127.0.0.1 port=6432 user=app_readonly dbname=monitor_ro" -c "SELECT 'monitor via pgbouncer -> standby';"
-PGPASSWORD="$PG_PASS"   psql "host=127.0.0.1 port=6432 user=app          dbname=logger"     -c "SELECT 'logger via pgbouncer -> primary';"
-PGPASSWORD="$RO_PASS"   psql "host=127.0.0.1 port=6432 user=app_readonly dbname=logger_ro"  -c "SELECT 'logger via pgbouncer -> standby';"
+PGPASSWORD="$PG_PASS"   psql "host=128.199.94.227 port=6432 user=app          dbname=monitor"    -c "SELECT 'monitor via pgbouncer -> primary';"
+PGPASSWORD="$RO_PASS"   psql "host=128.199.94.227 port=6432 user=app_readonly dbname=monitor_ro" -c "SELECT 'monitor via pgbouncer -> standby';"
+PGPASSWORD="$PG_PASS"   psql "host=128.199.94.227 port=6432 user=app          dbname=logger"     -c "SELECT 'logger via pgbouncer -> primary';"
+PGPASSWORD="$RO_PASS"   psql "host=128.199.94.227 port=6432 user=app_readonly dbname=logger_ro"  -c "SELECT 'logger via pgbouncer -> standby';"
 
 # E) WAL archiving is happening
 docker exec -it postgres-primary ls -la /var/lib/postgresql/archive/ | head
@@ -147,19 +147,19 @@ docker exec -it postgres-primary ls -la /var/lib/postgresql/archive/ | head
 ```env
 # --- Primary application DB ('monitor') ---
 # Writes + reads via pgbouncer transaction pool
-DATABASE_URL="postgresql://app:<postgres_password>@host.docker.internal:6432/monitor?pgbouncer=true&connection_limit=20&schema=public"
+DATABASE_URL="postgresql://app:<postgres_password>@128.199.94.227:6432/monitor?pgbouncer=true&connection_limit=20&schema=public"
 # Read replica for reports / heavy queries
-DATABASE_URL_REPLICA="postgresql://app_readonly:<readonly_password>@host.docker.internal:6432/monitor_ro?pgbouncer=true&connection_limit=20&schema=public"
+DATABASE_URL_REPLICA="postgresql://app_readonly:<readonly_password>@128.199.94.227:6432/monitor_ro?pgbouncer=true&connection_limit=20&schema=public"
 # Migrations: bypass pgbouncer (Prisma migrate uses advisory locks that
 # don't work in transaction pooling mode)
-DIRECT_URL="postgresql://app:<postgres_password>@host.docker.internal:5432/monitor?schema=public"
+DIRECT_URL="postgresql://app:<postgres_password>@128.199.94.227:5432/monitor?schema=public"
 
 # --- Secondary DB ('logger') ---
 # Same shape, just a different dbname/pool. Add more pairs per entry in
 # POSTGRES_DBS if you grow the list.
-LOGGER_DATABASE_URL="postgresql://app:<postgres_password>@host.docker.internal:6432/logger?pgbouncer=true&connection_limit=20&schema=public"
-LOGGER_DATABASE_URL_REPLICA="postgresql://app_readonly:<readonly_password>@host.docker.internal:6432/logger_ro?pgbouncer=true&connection_limit=20&schema=public"
-LOGGER_DIRECT_URL="postgresql://app:<postgres_password>@host.docker.internal:5432/logger?schema=public"
+LOGGER_DATABASE_URL="postgresql://app:<postgres_password>@128.199.94.227:6432/logger?pgbouncer=true&connection_limit=20&schema=public"
+LOGGER_DATABASE_URL_REPLICA="postgresql://app_readonly:<readonly_password>@128.199.94.227:6432/logger_ro?pgbouncer=true&connection_limit=20&schema=public"
+LOGGER_DIRECT_URL="postgresql://app:<postgres_password>@128.199.94.227:5432/logger?schema=public"
 ```
 
 Each Prisma schema (`prisma/schema.prisma`, `prisma/logger.prisma`, …) gets
@@ -167,13 +167,16 @@ its own `datasource db` block pointing at the matching pair of env vars.
 Generate clients into separate output directories so they don't clobber
 each other.
 
-If your app runs on the same Docker host but outside the `pg-net` network,
-`host.docker.internal` works on Mac/Windows; on Linux use the host IP or
-join your app to `pg-net` and use `pgbouncer:6432`.
+The examples above point at `128.199.94.227` — the server's public IP.
+Set `BIND_HOST=0.0.0.0` in `.env` so pgbouncer's published port listens
+on all interfaces (postgres-primary and postgres-standby already do).
+For apps running **on the same Docker host** but outside `pg-net`, you
+can also join them to `pg-net` and connect via `pgbouncer:6432`
+(internal hostname, no public exposure needed).
 
-For `DIRECT_URL` to work, you'd need to publish the primary's 5432 port
-to localhost. Either add `ports: ["127.0.0.1:5432:5432"]` to
-postgres-primary, or run migrations from inside a container on `pg-net`.
+Restrict the source IPs allowed to reach 5432 / 5433 / 6432 with a host
+firewall or cloud security group — Postgres auth is strong but the
+fewer eyes on the port, the better.
 
 `schema.prisma`:
 
