@@ -68,8 +68,14 @@ services:
         reservations:
           memory: 2G
     healthcheck:
-      # First DB in POSTGRES_DBS is the bootstrap target.
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $$(echo $${POSTGRES_DBS} | cut -d, -f1 | tr -d '[:space:]') -q"]
+      # -h 127.0.0.1 forces a TCP check. The postgres image starts a temp
+      # init server with listen_addresses='' (unix socket only) while
+      # docker-entrypoint-initdb.d scripts run. Without -h the unix-socket
+      # check would pass too early — before init-primary.sh has created the
+      # replicator role — letting the standby start and fail. TCP is only
+      # available once the real server starts, which is after all init scripts
+      # have completed.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $$(echo $${POSTGRES_DBS} | cut -d, -f1 | tr -d '[:space:]') -q"]
       interval: 10s
       timeout: 5s
       retries: 10

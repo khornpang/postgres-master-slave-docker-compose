@@ -5,11 +5,12 @@
 # + pg_stat_statements extension for every database in POSTGRES_DBS.
 set -euo pipefail
 
-read_secret() { tr -d '\n\r' < "/run/secrets/$1"; }
-
-REPLICATION_PASSWORD=$(read_secret replication_password)
-READONLY_PASSWORD=$(read_secret readonly_password)
-PGBOUNCER_AUTH_PASSWORD=$(read_secret pgbouncer_auth_password)
+# Secrets are pre-read by primary-entrypoint.sh (as root) and exported as
+# env vars because this script runs as the postgres OS user (via gosu inside
+# docker-entrypoint.sh) and cannot read 0600 root:root secret files directly.
+: "${REPLICATION_PASSWORD:?REPLICATION_PASSWORD not set — check primary-entrypoint.sh}"
+: "${READONLY_PASSWORD:?READONLY_PASSWORD not set — check primary-entrypoint.sh}"
+: "${PGBOUNCER_AUTH_PASSWORD:?PGBOUNCER_AUTH_PASSWORD not set — check primary-entrypoint.sh}"
 
 # POSTGRES_DBS is comma-separated. The first entry is the bootstrap DB
 # already created by the postgres image (POSTGRES_DB == first entry,

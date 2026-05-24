@@ -20,14 +20,16 @@ if [ ! -s "$PGDATA/PG_VERSION" ]; then
   chown -R postgres:postgres "$PGDATA"
   chmod 0700 "$PGDATA"
 
-  # Wait for primary to be ready to accept replication connections
+  # Wait until the replicator role exists and authenticates successfully.
+  # pg_isready does not authenticate — it returns OK as soon as TCP responds,
+  # which can happen before init-primary.sh has created the replicator role.
+  # Using a real replication connection (IDENTIFY_SYSTEM) ensures auth works
+  # before we attempt pg_basebackup.
   until PGPASSWORD="$REPLICATION_PASSWORD" \
-        gosu postgres pg_isready \
-          -h "$PRIMARY_HOST" \
-          -p "$PRIMARY_PORT" \
-          -U "$REPLICATION_USER" \
-          -d postgres -q; do
-    echo "[init-standby] Waiting for primary at ${PRIMARY_HOST}:${PRIMARY_PORT}..."
+        gosu postgres psql \
+          "host=${PRIMARY_HOST} port=${PRIMARY_PORT} user=${REPLICATION_USER} dbname=replication replication=yes" \
+          -c "IDENTIFY_SYSTEM;" -q >/dev/null 2>&1; do
+    echo "[init-standby] Waiting for replication access on ${PRIMARY_HOST}:${PRIMARY_PORT}..."
     sleep 2
   done
 
