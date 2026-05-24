@@ -19,8 +19,8 @@ for name in postgres replication readonly pgbouncer_auth; do
     exit 1
   fi
   gen > "$file"
-  chmod 0600 "$file"
-  echo "Wrote $file ($(wc -c < "$file") bytes, mode 0600)"
+  chmod 0644 "$file"
+  echo "Wrote $file ($(wc -c < "$file") bytes, mode 0644)"
 done
 
 echo
